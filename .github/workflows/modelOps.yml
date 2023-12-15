@@ -1,0 +1,82 @@
+# This is a basic workflow to help you get started with Actions
+
+name: Modelops Deploy
+
+# Controls when the workflow will run
+on:
+  # Triggers the workflow on push or pull request events but only for the "main" branch
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  # This workflow contains a single job called "build"
+  build:
+    # The type of runner that the job will run on
+    runs-on: ubuntu-latest
+    container: adsoft/aiops:latest
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v3
+
+      # Runs a single command using the runners shell
+      - name: hello-world
+        run: echo "Hello, world! from workflows"
+        
+      - name: pip install
+        run: pip install pandas
+
+      - name: run model 
+        run: python points_inmap.py
+
+      - name: docker login
+        env:
+          DOCKER_USER: ${{secrets.DOCKER_USER}}
+          DOCKER_PASSWORD: ${{secrets.DOCKER_PASSWORD}}
+        run: |
+          docker login -u $DOCKER_USER -p $DOCKER_PASSWORD 
+
+      - name: Download and run the Docker base image
+        run: docker run -d --name serving_base tensorflow/serving
+
+      - name: copy model to the Docker image
+        run: docker cp ${{secrets.MODEL_NAME}} serving_base:/models/${{secrets.MODEL_NAME}}
+
+      - name: Build the custom Docker image
+        run: docker commit --change "ENV MODEL_NAME ${{secrets.MODEL_NAME}}" serving_base ${{secrets.DOCKER_USER}}/tensorflow-${{secrets.MODEL_NAME}}:${{ github.sha }}
+      
+      - name: Docker Push 
+        run: docker push ${{secrets.DOCKER_USER}}/tensorflow-${{secrets.MODEL_NAME}}:${{ github.sha }}
+
+      
+      - name: update docker user in k8 
+        run: sed -i 's/{docker_user}/${{secrets.DOCKER_USER}}/g' manifests/linear_model_k8s.yaml
+
+      - name: update model name in k8 
+        run: sed -i 's/{model_name}/${{secrets.MODEL_NAME}}/g' manifests/linear_model_k8s.yaml
+
+      - name: update _ by - 
+        run: sed -i 's/_/-/g' manifests/linear_model_k8s.yaml
+
+      - name: update sha in k8
+        run: sed -i 's/{github.sha}/${{ github.sha }}/g' manifests/linear_model_k8s.yaml
+
+      - name: list  
+        run: cat manifests/linear_model_k8s.yaml
+
+      - uses: okteto/context@2.7.0
+        with:
+          token: ${{secrets.OKTETO_TOKEN }}
+          
+      - name: Deploy and Wait
+        uses: okteto/actions/deploy@v1
+        env:
+          KUBECONFIG: ${{ steps.namespace.outputs.kubeconfig }}
+        with:
+          namespace: ${{secrets.OKTETO_NAMESPACE }}
+          manifest: manifests/linear_model_k8s.yaml
+          tag: ${{ secrets.DOCKER_USERNAME }}/tensorflow_${{secrets.MODEL_NAME}}:${{ github.sha }}
